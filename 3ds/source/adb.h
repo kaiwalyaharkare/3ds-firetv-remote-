@@ -26,9 +26,15 @@ int  adb_connect(const char *ip, int port, int auth_wait_ms, adb_progress_fn cb,
 void adb_disconnect(void);
 bool adb_is_connected(void);
 
-/* Queue a shell command (no trailing newline needed). Consecutive
- * "input keyevent N" commands are merged into one call for speed. */
+/* Queue a shell command (no trailing newline needed). Commands are sent one
+ * at a time, each only after the TV has finished the previous one; consecutive
+ * "input keyevent N" commands waiting in the queue are merged into one call.
+ * Returns false (press dropped) if too many key presses are already waiting. */
 bool adb_queue(const char *cmd);
+
+/* True when connected and nothing is queued or running on the TV.
+ * Use it to gate auto-repeat so a held button can't build up a backlog. */
+bool adb_idle(void);
 
 /* Non-blocking: pump network I/O and send queued commands.
  * Call once per frame. Returns false if the connection dropped. */

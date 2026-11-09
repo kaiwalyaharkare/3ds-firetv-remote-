@@ -520,11 +520,17 @@ int main(void) {
             continue;
         }
 
+        /* A fresh press always counts. Auto-repeat from a held button only fires
+         * when the TV has caught up, so holding never builds a backlog and the
+         * movement stops as soon as the button is released. */
+        bool idle = adb_idle();
+        #define PRESSED(k) ((down & (k)) || ((rep & (k)) && idle))
+
         if (tv_ok) {
-            if (rep & KEY_UP)    send_key(K_UP, "Up");
-            if (rep & KEY_DOWN)  send_key(K_DOWN, "Down");
-            if (rep & KEY_LEFT)  send_key(K_LEFT, "Left");
-            if (rep & KEY_RIGHT) send_key(K_RIGHT, "Right");
+            if (PRESSED(KEY_UP))    send_key(K_UP, "Up");
+            if (PRESSED(KEY_DOWN))  send_key(K_DOWN, "Down");
+            if (PRESSED(KEY_LEFT))  send_key(K_LEFT, "Left");
+            if (PRESSED(KEY_RIGHT)) send_key(K_RIGHT, "Right");
 
             if (held & KEY_A) {
                 if (++a_frames == LONGPRESS_FRAMES && !a_long_sent) {
@@ -541,10 +547,10 @@ int main(void) {
             if (down & KEY_X)     send_key(K_HOME, "Home");
             if (down & KEY_Y)     send_key(K_MENU, "Menu");
             if (down & KEY_START) send_key(K_PLAYPAUSE, "Play / Pause");
-            if (rep & KEY_L)      send_key(K_REWIND, "Rewind");
-            if (rep & KEY_R)      send_key(K_FF, "Forward");
-            if (rep & KEY_ZL)     send_key(K_VOLDOWN, "Vol -");
-            if (rep & KEY_ZR)     send_key(K_VOLUP, "Vol +");
+            if (PRESSED(KEY_L))   send_key(K_REWIND, "Rewind");
+            if (PRESSED(KEY_R))   send_key(K_FF, "Forward");
+            if (PRESSED(KEY_ZL))  send_key(K_VOLDOWN, "Vol -");
+            if (PRESSED(KEY_ZR))  send_key(K_VOLUP, "Vol +");
             if (down & KEY_CSTICK_LEFT)  send_key(K_PREV, "Previous");
             if (down & KEY_CSTICK_RIGHT) send_key(K_NEXT, "Next");
             if (down & KEY_SELECT) type_text();
@@ -566,7 +572,7 @@ int main(void) {
         } else if ((held & KEY_TOUCH) && pressed_btn >= 0) {
             if (hit_test(&t) != pressed_btn) {
                 pressed_btn = -1;       /* finger slid off */
-            } else if (buttons[pressed_btn].repeat && ++touch_hold > 18 && touch_hold % 5 == 0) {
+            } else if (buttons[pressed_btn].repeat && ++touch_hold > 18 && touch_hold % 5 == 0 && idle) {
                 run_button(&buttons[pressed_btn]);
             }
         } else if (up & KEY_TOUCH) {

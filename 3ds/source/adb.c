@@ -68,6 +68,20 @@ static uint8_t  g_payload[MAX_RX + 1];
 static char g_queue[QUEUE_LEN][CMD_LEN];
 static int  g_qhead = 0, g_qcount = 0;
 
+/* Completion tracking. adbd OKAYs a write as soon as it has the bytes, long before
+ * the TV has run the command (`input` starts a JVM, ~0.5-1 s each). So every command
+ * ends with `echo D$((6*7))N`; the shell prints "D42N" when it's done. Until then we
+ * hold new presses here, where they get merged into one call, instead of piling them
+ * up on the TV where they can't be merged or dropped. The echoed command line itself
+ * contains "D$((6*7))N", never "D42N", so a PTY echo can't fake it. */
+#define DONE_CMD       "; echo D$((6*7))N\n"
+#define DONE_MARK      "D42N"
+#define BUSY_TIMEOUT_MS 4000
+#define MAX_KEY_BACKLOG 6
+static bool     g_busy = false;
+static uint64_t g_busy_since = 0;
+static char     g_mark_tail[8] = "";
+
 static char g_err[160] = "";
 static char g_devname[64] = "";
 
@@ -466,6 +480,8 @@ int adb_connect(const char *ip, int port, int auth_wait_ms, adb_progress_fn cb, 
 
     g_connected = true;
     g_can_write = true;
+    g_busy = false;
+    g_mark_tail[0] = 0;
     g_qhead = g_qcount = 0;
     g_err[0] = 0;
     return 0;
@@ -489,16 +505,46 @@ bool adb_is_connected(void) { return g_connected; }
 const char *adb_last_error(void) { return g_err; }
 const char *adb_device_name(void) { return g_devname; }
 
+static bool is_plain_keyevent(const char *c) {
+    return strncmp(c, "input keyevent ", 15) == 0 && !strstr(c, "--");
+}
+
 bool adb_queue(const char *cmd) {
-    if (g_qcount >= QUEUE_LEN || strlen(cmd) >= CMD_LEN - 2) return false;
+    if (g_qcount >= QUEUE_LEN || strlen(cmd) >= CMD_LEN - 32) return false;
+    if (is_plain_keyevent(cmd)) {
+        /* Never fall more than a few taps behind the user. */
+        int keys = 0;
+        for (int i = 0; i < g_qcount; i++)
+            if (is_plain_keyevent(g_queue[(g_qhead + i) % QUEUE_LEN])) keys++;
+        if (keys >= MAX_KEY_BACKLOG) return false;
+    }
     int idx = (g_qhead + g_qcount) % QUEUE_LEN;
     snprintf(g_queue[idx], CMD_LEN, "%s", cmd);
     g_qcount++;
     return true;
 }
 
-static bool is_plain_keyevent(const char *c) {
-    return strncmp(c, "input keyevent ", 15) == 0 && !strstr(c, "--");
+bool adb_idle(void) {
+    return g_connected && !g_busy && g_qcount == 0;
+}
+
+/* Look for DONE_MARK in shell output, including when it's split across packets. */
+static void scan_for_done(const uint8_t *data, size_t len) {
+    char buf[sizeof(g_mark_tail) + 512];
+    size_t tl = strlen(g_mark_tail);
+    while (len > 0) {
+        size_t n = len > 512 ? 512 : len;
+        memcpy(buf, g_mark_tail, tl);
+        memcpy(buf + tl, data, n);
+        buf[tl + n] = 0;
+        for (size_t i = 0; i < tl + n; i++) if (!buf[i]) buf[i] = ' ';
+        if (strstr(buf, DONE_MARK)) g_busy = false;
+        size_t keep = tl + n < 3 ? tl + n : 3;          /* strlen(DONE_MARK) - 1 */
+        memcpy(g_mark_tail, buf + tl + n - keep, keep);
+        g_mark_tail[keep] = 0;
+        tl = keep;
+        data += n; len -= n;
+    }
 }
 
 /* Pop one command, merging a run of plain keyevents into a single `input` call. */
@@ -509,13 +555,13 @@ static void build_next(char *out, size_t outlen) {
     g_qcount--;
     while (merge && g_qcount > 0 && is_plain_keyevent(g_queue[g_qhead])) {
         const char *codes = g_queue[g_qhead] + 15;
-        if (strlen(out) + strlen(codes) + 3 >= outlen) break;
+        if (strlen(out) + strlen(codes) + 2 + sizeof(DONE_CMD) >= outlen) break;
         strcat(out, " ");
         strcat(out, codes);
         g_qhead = (g_qhead + 1) % QUEUE_LEN;
         g_qcount--;
     }
-    strcat(out, "\n");
+    strcat(out, DONE_CMD);
 }
 
 bool adb_poll(void) {
@@ -529,6 +575,7 @@ bool adb_poll(void) {
     int r;
     while ((r = try_parse(&m)) > 0) {
         if (m.cmd == A_WRTE && m.arg1 == LOCAL_ID) {
+            scan_for_done(m.data, m.len);
             send_msg(A_OKAY, LOCAL_ID, m.arg0, NULL, 0);   /* ack shell output */
         } else if (m.cmd == A_OKAY && m.arg1 == LOCAL_ID) {
             g_can_write = true;
@@ -540,8 +587,11 @@ bool adb_poll(void) {
     }
     if (r < 0) { set_err("Protocol error"); adb_disconnect(); return false; }
 
-    if (g_can_write && g_qcount > 0) {
-        char cmd[CMD_LEN + 16];
+    /* If the TV never printed the marker (odd shell, lost output), don't freeze. */
+    if (g_busy && now_ms() - g_busy_since > BUSY_TIMEOUT_MS) g_busy = false;
+
+    if (g_can_write && !g_busy && g_qcount > 0) {
+        char cmd[CMD_LEN + 32];
         build_next(cmd, sizeof(cmd));
         if (send_msg(A_WRTE, LOCAL_ID, g_remote_id, cmd, strlen(cmd)) < 0) {
             set_err("Send failed");
@@ -549,7 +599,8 @@ bool adb_poll(void) {
             return false;
         }
         g_can_write = false;
-        g_write_time = now_ms();
+        g_busy = true;
+        g_write_time = g_busy_since = now_ms();
     } else if (!g_can_write && now_ms() - g_write_time > WRITE_STALL_MS) {
         set_err("TV stopped responding");
         adb_disconnect();

@@ -2,13 +2,14 @@
 """Fake Fire TV adbd for testing the 3DS ADB client on a PC.
 Implements CNXN/AUTH (with real RSA verification of the Android pubkey format),
 OPEN shell:, WRTE/OKAY flow control. Usage: mock_adbd.py <bind-ip> <port>"""
-import base64, os, socket, struct, sys
+import base64, os, select, socket, struct, sys, time
 from cryptography.hazmat.primitives.asymmetric import padding, rsa, utils
 from cryptography.hazmat.primitives import hashes
 from cryptography.exceptions import InvalidSignature
 
 CNXN, AUTH, OPEN, OKAY, CLSE, WRTE = 0x4e584e43, 0x48545541, 0x4e45504f, 0x59414b4f, 0x45534c43, 0x45545257
 trusted = []   # accepted public keys
+RUN_SECONDS = 0.3   # how long each shell command "takes" on the fake TV
 log = open(sys.argv[3], "a") if len(sys.argv) > 3 else sys.stdout
 
 def send(c, cmd, a0, a1, data=b""):
@@ -82,10 +83,25 @@ def session(c):
             can_write = False
             assert a0 == local and a1 == 77
             print("SHELL:", data.decode().rstrip(), file=log, flush=True)
-            send(c, WRTE, 77, local, b"$ ")   # prompt the client must ack
+            # Like a real PTY shell: echo the command line back. It contains the
+            # marker's *source* "D$((6*7))N", which must NOT count as "done".
+            send(c, WRTE, 77, local, data.replace(b"\n", b"\r\n"))
             unacked += 1
+            send(c, OKAY, 77, local); can_write = True   # adbd OKAYs at once...
+            # ...but the command takes a while to run (a real `input` starts a JVM).
+            # The client must not send the next command until it sees the marker.
+            deadline = time.time() + RUN_SECONDS
+            while (left := deadline - time.time()) > 0:
+                if not select.select([c], [], [], left)[0]:
+                    break
+                cmd2, b0, b1, d2 = recv(c)
+                assert cmd2 != WRTE, "client sent a new command before the previous one finished"
+                if cmd2 == OKAY:
+                    unacked -= 1
+            if b"echo D$((6*7))N" in data:
+                send(c, WRTE, 77, local, b"D42N\r\n$ ")
+                unacked += 1
             assert unacked < 3, "client is not acking shell output"
-            send(c, OKAY, 77, local); can_write = True
         elif cmd == OKAY:
             unacked -= 1
 

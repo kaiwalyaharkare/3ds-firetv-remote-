@@ -63,15 +63,34 @@ The app launched and the UI looked right, but it couldn't connect to the TV. A P
 
 After reinstalling, the 3DS showed **Connected**, accepted the TV's "Allow USB debugging?" prompt, and controlled the Fire TV.
 
+### 6. Lag: repeated presses replayed slowly and couldn't be cancelled
+
+Pressing a button several times quickly worked, but the TV fell behind and then slowly caught up on every press, even after the buttons were released.
+
+**Cause:** each `input keyevent` starts a small Java process on the Fire TV, which takes roughly 0.5–1 s. adbd acknowledges a write (`OKAY`) as soon as it *receives* the bytes, not when the command has *finished*. So the app thought the TV was ready and sent every press as its own command. The commands piled up in the TV's shell, and nothing could merge or cancel them.
+
+**Fix** (`3ds/source/adb.c`, `main.c`):
+1. Every command ends with `; echo D$((6*7))N`. The shell prints `D42N` when the command is done, and only then is the next command sent. The echoed command line contains the unexpanded `D$((6*7))N`, so the terminal echo can't be mistaken for "done".
+2. Presses made while the TV is busy wait on the 3DS and are **merged** into one `input keyevent a b c` call, which costs a single process start.
+3. **At most 6 taps** can wait. Extra mashing is dropped instead of replayed later.
+4. **Auto-repeat from a held button only fires when the TV has caught up**, so holding a direction scrolls as fast as the TV can go and stops the moment the button is released.
+5. If the marker never arrives, the app carries on after 4 s instead of freezing.
+
+The fake TV in `tests/` now behaves like the real one. It echoes the command line, takes time to run each command, and fails the test if the client sends another command before the previous one finishes.
+
 ## Status
 
 | | |
 |---|---|
-| Host tests against the fake Fire TV | ✅ (before the connect fix; the fix keeps POSIX behavior) |
+| Host tests against the fake Fire TV (including the lag fix) | ✅ |
 | Builds with real devkitARM (Windows/MSYS2) | ✅ |
 | `.cia` packaged and installed with FBI | ✅ |
 | Connects to and controls a real Fire TV from an original 3DS | ✅ |
 | CI build on GitHub Actions | runs on every push |
+
+## Known issues
+
+- The **Menu** (☰) button doesn't seem to do anything on some screens. The app sends `KEYCODE_MENU` (82), which Amazon documents as the remote's menu key; still investigating.
 
 ## Ideas for later
 

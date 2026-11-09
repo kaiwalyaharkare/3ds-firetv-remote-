@@ -9,7 +9,16 @@ static int run(const char *ip, int port) {
     printf("connected to %s\n", adb_device_name());
     const char *cmds[] = {"input keyevent 19","input keyevent 19","input keyevent 20","input keyevent --longpress 23","input text 'hi%sthere'","input keyevent 4"};
     for (int i = 0; i < 6; i++) adb_queue(cmds[i]);
-    for (int i = 0; i < 100; i++) { if (!adb_poll()) { printf("poll failed: %s\n", adb_last_error()); return 1; } usleep(10000); }
+    for (int i = 0; i < 300 && !adb_idle(); i++) { if (!adb_poll()) { printf("poll failed: %s\n", adb_last_error()); return 1; } usleep(10000); }
+    if (!adb_idle()) { printf("FAIL: queue never drained\n"); return 1; }
+
+    /* Mashing a button while the TV is busy must not build an unbounded backlog. */
+    int accepted = 0;
+    for (int i = 0; i < 20; i++) accepted += adb_queue("input keyevent 22");
+    printf("mashed 20 presses, accepted %d\n", accepted);
+    if (accepted > 6) { printf("FAIL: backlog not capped\n"); return 1; }
+    for (int i = 0; i < 300 && !adb_idle(); i++) { if (!adb_poll()) { printf("poll failed: %s\n", adb_last_error()); return 1; } usleep(10000); }
+    if (!adb_idle()) { printf("FAIL: queue never drained\n"); return 1; }
     adb_disconnect();
     return 0;
 }
