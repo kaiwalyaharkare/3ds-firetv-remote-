@@ -1,5 +1,12 @@
 build/
 *.3dsx
+*.cia
+
+# Never commit ADB keys or local settings
+adbkey
+adbkey.pub
+*.pem
+tv-ip.txt
 *.smdh
 *.elf
 *.map
