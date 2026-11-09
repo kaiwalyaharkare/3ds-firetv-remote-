@@ -341,30 +341,55 @@ static int recv_msg(amsg *m, uint64_t deadline, const char *status, adb_progress
     }
 }
 
+/* Has a non-blocking connect() finished? 1 = connected, 0 = still in progress, -1 = failed.
+ * Asks connect() again instead of trusting SO_ERROR / poll revents, which the 3DS
+ * soc service does not always report the way POSIX does. */
+static int connect_done(int fd, const struct sockaddr_in *a) {
+    if (connect(fd, (const struct sockaddr *)a, sizeof(*a)) == 0) return 1;
+    if (errno == EISCONN) return 1;
+    if (errno == EINPROGRESS || errno == EALREADY || errno == EWOULDBLOCK || errno == EAGAIN) return 0;
+    return -1;
+}
+
+static int g_conn_errno;   /* last connect errno, shown in the error message */
+
 static int tcp_connect(const char *ip, int port, int timeout_ms) {
     struct sockaddr_in a;
     memset(&a, 0, sizeof(a));
     a.sin_family = AF_INET;
     a.sin_port = htons(port);
-    if (!inet_aton(ip, &a.sin_addr)) return -1;
+    g_conn_errno = 0;
+    if (!inet_aton(ip, &a.sin_addr)) { g_conn_errno = EINVAL; return -1; }
 
+    /* 1) Non-blocking connect, so the UI never hangs on a dead address. */
     int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (fd < 0) return -1;
+    if (fd < 0) { g_conn_errno = errno; return -1; }
     set_nonblocking(fd, true);
     if (connect(fd, (struct sockaddr *)&a, sizeof(a)) == 0) return fd;
-    if (errno != EINPROGRESS && errno != EWOULDBLOCK && errno != EAGAIN) { close(fd); return -1; }
-
-    struct pollfd p = { fd, POLLOUT, 0 };
-    if (poll(&p, 1, timeout_ms) <= 0 || (p.revents & (POLLERR | POLLHUP | POLLNVAL))) {
-        close(fd);
-        return -1;
+    g_conn_errno = errno;
+    if (errno == EINPROGRESS || errno == EALREADY || errno == EWOULDBLOCK || errno == EAGAIN) {
+        uint64_t deadline = now_ms() + timeout_ms;
+        while (now_ms() < deadline) {
+            struct pollfd p = { fd, POLLOUT, 0 };
+            poll(&p, 1, 100);
+            int d = connect_done(fd, &a);
+            if (d == 1) return fd;
+            if (d < 0) { g_conn_errno = errno; break; }
+        }
     }
-#ifdef SO_ERROR
-    int err = 0;
-    socklen_t elen = sizeof(err);
-    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &elen) == 0 && err != 0) { close(fd); return -1; }
-#endif
-    return fd;
+    close(fd);
+
+    /* 2) Fallback: plain blocking connect. Slower to fail, but sidesteps any
+     *    non-blocking quirks in the 3DS network stack. */
+    fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (fd < 0) { g_conn_errno = errno; return -1; }
+    if (connect(fd, (struct sockaddr *)&a, sizeof(a)) == 0) {
+        set_nonblocking(fd, true);
+        return fd;
+    }
+    g_conn_errno = errno;
+    close(fd);
+    return -1;
 }
 
 /* ---------- public API ---------- */
@@ -388,7 +413,7 @@ int adb_connect(const char *ip, int port, int auth_wait_ms, adb_progress_fn cb, 
 
     progress(cb, user, "Connecting...");
     g_sock = tcp_connect(ip, port, 3000);
-    if (g_sock < 0) { set_err("Can't reach %s:%d (is ADB debugging on?)", ip, port); return -1; }
+    if (g_sock < 0) { set_err("Can't reach %s:%d (err %d). Is ADB debugging on?", ip, port, g_conn_errno); return -1; }
 
     static const char banner[] = "host::";
     if (send_msg(A_CNXN, A_VERSION, MAX_PAYLOAD, banner, sizeof(banner)) < 0) goto io_err;
@@ -572,22 +597,22 @@ int adb_scan(const char *ip_in_subnet, int port, char out[][16], int max,
         bool done[BATCH] = { false };
         uint64_t deadline = now_ms() + WAIT_MS;
         while (now_ms() < deadline) {
-            if (poll(pf, n, 50) > 0) {
-                for (int i = 0; i < n; i++) {
-                    if (done[i] || !pf[i].revents) continue;
-                    done[i] = true;
-                    bool ok = (pf[i].revents & POLLOUT) && !(pf[i].revents & (POLLERR | POLLHUP | POLLNVAL));
-#ifdef SO_ERROR
-                    if (ok) {
-                        int err = 0; socklen_t el = sizeof(err);
-                        if (getsockopt(pf[i].fd, SOL_SOCKET, SO_ERROR, &err, &el) == 0 && err) ok = false;
-                    }
-#endif
-                    if (ok && found < max) {
-                        struct in_addr ia; ia.s_addr = htonl(ips[i]);
-                        snprintf(out[found++], 16, "%s", inet_ntoa(ia));
-                    }
-                    pf[i].events = 0;   /* stop polling this one */
+            poll(pf, n, 50);
+            /* Check every pending socket directly; don't rely on revents. */
+            for (int i = 0; i < n; i++) {
+                if (done[i]) continue;
+                struct sockaddr_in a;
+                memset(&a, 0, sizeof(a));
+                a.sin_family = AF_INET;
+                a.sin_port = htons(port);
+                a.sin_addr.s_addr = htonl(ips[i]);
+                int d = connect_done(pf[i].fd, &a);
+                if (d == 0) continue;            /* still connecting */
+                done[i] = true;
+                pf[i].events = 0;                /* stop polling this one */
+                if (d == 1 && found < max) {
+                    struct in_addr ia; ia.s_addr = htonl(ips[i]);
+                    snprintf(out[found++], 16, "%s", inet_ntoa(ia));
                 }
             }
             bool all = true;
