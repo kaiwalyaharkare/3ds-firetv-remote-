@@ -19,9 +19,15 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install libraries
+        # pkg.devkitpro.org sometimes answers CI runners with a 403; retry with backoff.
         run: |
           PAC=$(command -v dkp-pacman || command -v pacman)
-          $PAC -Sy --noconfirm --needed citro2d citro3d 3ds-mbedtls
+          for i in 1 2 3 4 5; do
+            $PAC -Sy --noconfirm --needed citro2d citro3d 3ds-mbedtls && exit 0
+            echo "pacman failed (attempt $i/5), retrying in $((i * 20))s..."
+            sleep $((i * 20))
+          done
+          exit 1
 
       - name: Build
         run: make -C 3ds
