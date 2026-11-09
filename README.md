@@ -11,10 +11,15 @@ The 3DS speaks the **ADB protocol** directly to the Fire TV. You don't need a PC
  └──────────┘                            └──────────┘
 ```
 
+![UI preview](docs/ui-preview.png)
+
+*(Mockup. On the device the button glyphs render with the 3DS system font.)*
+
 ## Features
 
 - D-pad, select, back, home, menu, and media keys mapped to the 3DS buttons
-- Touch-screen panel with volume, mute, sleep/wake, search, and one-tap **Netflix / YouTube / Settings**
+- Clean graphical UI (citro2d): live connection status, animated feedback, and a touch panel with volume, mute, sleep/wake, search, and one-tap **Netflix / YouTube / Settings**
+- Installs as a **.cia** with its own HOME Menu icon and banner, or runs as a `.3dsx` from the Homebrew Launcher
 - **Type text** on the TV with the 3DS keyboard (no more on-screen keyboard hunting)
 - Hold **A** for a long press (opens context menus)
 - **Auto-finds the Fire TV** by scanning your network the first time
@@ -35,7 +40,7 @@ The 3DS speaks the **ADB protocol** directly to the Fire TV. You don't need a PC
 | ZL / ZR (New 3DS) | Volume − / + |
 | C-Stick ← / → (New 3DS) | Previous / Next |
 | SELECT | Type text with the keyboard |
-| Touch screen | Extra buttons, app shortcuts, set TV IP, exit |
+| Touch screen | Extra buttons, app shortcuts, scan / set TV IP, exit (vol / rewind / forward repeat when held) |
 
 > Volume and mute only work if your TV supports HDMI-CEC volume control, the same as the original remote.
 
@@ -48,9 +53,18 @@ The 3DS speaks the **ADB protocol** directly to the Fire TV. You don't need a PC
 
 ## Install
 
-1. Download `firetv-remote.3dsx` from the [Releases](../../releases) page (or from the latest run on the **Actions** tab).
-2. Copy it to `/3ds/` on the SD card. Over Wi-Fi with **ftpd**: open ftpd on the 3DS, then connect from FileZilla (or any FTP app on your phone) to the address it shows, e.g. `192.168.1.42` port `5000`, and upload the file into `/3ds/`.
-3. Launch **FireTV Remote** from the Homebrew Launcher.
+Download from the [Releases](../../releases) page, or from the latest run on the **Actions** tab (artifacts `firetv-remote-cia` / `firetv-remote-3dsx`).
+
+**Option A: HOME Menu app (.cia, recommended)**
+1. Copy `firetv-remote.cia` to `/cias/` on the SD card.
+2. Open **FBI**, then go to *SD → cias → firetv-remote.cia → Install CIA*.
+3. **FireTV Remote** appears on the HOME Menu.
+
+**Option B: Homebrew Launcher (.3dsx)**
+1. Copy `firetv-remote.3dsx` to `/3ds/`.
+2. Launch it from the Homebrew Launcher.
+
+**Copying over Wi-Fi with ftpd:** open ftpd on the 3DS and note the address it shows (e.g. `192.168.1.42:5000`). Connect from FileZilla or any phone FTP app with that host and port and no login, then upload the file.
 
 ## First run
 
@@ -69,9 +83,13 @@ The GitHub Actions workflow builds the app on every push. To build locally:
 ```sh
 # Install devkitPro: https://devkitpro.org/wiki/Getting_Started
 sudo dkp-pacman -S 3ds-dev 3ds-mbedtls
-make -C 3ds
-# -> 3ds/firetv-remote.3dsx
+make -C 3ds          # -> 3ds/firetv-remote.3dsx
+make -C 3ds cia      # -> 3ds/firetv-remote.cia (needs makerom + bannertool on PATH)
 ```
+
+`makerom` comes from [3DSGuy/Project_CTR](https://github.com/3DSGuy/Project_CTR) and `bannertool` from [diasurgical/bannertool](https://github.com/diasurgical/bannertool). The CI workflow builds both from source. The CIA's RSF is based on Steveice10's [buildtools](https://github.com/Steveice10/buildtools) template (MIT).
+
+Pushing a tag like `v1.0.0` creates a GitHub Release with both files attached.
 
 Send it straight to the 3DS with `3dslink 3ds/firetv-remote.3dsx` (press Y in the Homebrew Launcher first).
 
@@ -94,7 +112,7 @@ sudo apt install libmbedtls-dev   # mbedtls 2.28
 3. Opens one persistent `shell:` stream
 4. Each button press becomes `input keyevent <code>` (or `input text`, `monkey -p <app>`), written to that stream with proper `WRTE`/`OKAY` flow control
 
-`3ds/source/main.c` handles the UI (libctru consoles on both screens), input, and settings.
+`3ds/source/main.c` handles the citro2d UI (both screens, with vector icons drawn in code), input, and settings.
 
 ### Files on the SD card
 

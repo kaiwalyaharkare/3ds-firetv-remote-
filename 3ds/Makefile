@@ -29,7 +29,7 @@ CFLAGS   +=  $(INCLUDE) -D__3DS__
 ASFLAGS  :=  -g $(ARCH)
 LDFLAGS   =  -specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS     :=  -lmbedtls -lmbedx509 -lmbedcrypto -lctru -lm
+LIBS     :=  -lcitro2d -lcitro3d -lmbedtls -lmbedx509 -lmbedcrypto -lctru -lm
 LIBDIRS  :=  $(PORTLIBS) $(CTRULIB)
 
 #---------------------------------------------------------------------------------
@@ -52,17 +52,21 @@ export LIBPATHS :=  $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 export APP_ICON := $(TOPDIR)/$(ICON)
 export _3DSXFLAGS += --smdh=$(CURDIR)/$(TARGET).smdh
 
-.PHONY: all clean
+.PHONY: all clean cia
 
 all: $(BUILD)
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
+
+# Needs makerom + bannertool on PATH (see README)
+cia: all
+	@cia/make_cia.sh $(TARGET).elf $(TARGET).cia
 
 $(BUILD):
 	@mkdir -p $@
 
 clean:
 	@echo clean ...
-	@rm -fr $(BUILD) $(TARGET).3dsx $(TARGET).smdh $(TARGET).elf
+	@rm -fr $(BUILD) $(TARGET).3dsx $(TARGET).smdh $(TARGET).elf $(TARGET).cia
 
 #---------------------------------------------------------------------------------
 else
